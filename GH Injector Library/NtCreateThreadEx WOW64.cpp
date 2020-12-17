@@ -4,7 +4,7 @@
 
 #include "Start Routine.h"
 
-DWORD SR_NtCreateThreadEx_WOW64(HANDLE hTargetProc, f_Routine_WOW64 pRoutine, DWORD pArg, bool CloakThread, DWORD & Out, ERROR_DATA & error_data)
+DWORD SR_NtCreateThreadEx_WOW64(HANDLE hTargetProc, f_Routine_WOW64 pRoutine, DWORD pArg, bool CloakThread, DWORD & Out, DWORD Timeout, ERROR_DATA & error_data)
 {
 	void * pEntrypoint = nullptr;
 	if (CloakThread)
@@ -19,7 +19,8 @@ DWORD SR_NtCreateThreadEx_WOW64(HANDLE hTargetProc, f_Routine_WOW64 pRoutine, DW
 
 		pEntrypoint = pi.GetEntrypoint();
 	}
-	DWORD Flags		= THREAD_CREATE_FLAGS_CREATE_SUSPENDED | THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH | THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER;
+
+	DWORD Flags		= THREAD_CREATE_FLAGS_CREATE_SUSPENDED | THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER;
 	HANDLE hThread	= nullptr;
 
 	void * pMem = VirtualAllocEx(hTargetProc, nullptr, 0x200, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -137,10 +138,10 @@ DWORD SR_NtCreateThreadEx_WOW64(HANDLE hTargetProc, f_Routine_WOW64 pRoutine, DW
 		}
 	}
 
-	DWORD dwWaitRet = WaitForSingleObject(hThread, SR_REMOTE_TIMEOUT);
+	DWORD dwWaitRet = WaitForSingleObject(hThread, Timeout);
 	if (dwWaitRet != WAIT_OBJECT_0)
 	{
-		INIT_ERROR_DATA(error_data, GetLastError());
+		INIT_ERROR_DATA(error_data, dwWaitRet);
 
 		TerminateThread(hThread, 0);
 		CloseHandle(hThread);

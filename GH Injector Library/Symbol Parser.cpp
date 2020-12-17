@@ -5,28 +5,45 @@
 SYMBOL_PARSER::SYMBOL_PARSER()
 {
 	m_Initialized	= false;
+	m_Ready			= false;
 	m_SymbolTable	= 0;
-	m_Filesize		= 0;
 	m_hPdbFile		= nullptr;
 	m_hProcess		= nullptr;
+
+	m_bInterruptEvent	= false;
+	m_hInterruptEvent	= CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	m_fProgress			= 0.0f;
 }
 
 SYMBOL_PARSER::~SYMBOL_PARSER()
 {
+	if (m_hInterruptEvent)
+	{
+		CloseHandle(m_hInterruptEvent);
+	}
+
 	if (m_Initialized)
 	{
-		SymUnloadModule64(m_hProcess, m_SymbolTable);
+		if (m_SymbolTable)
+		{
+			SymUnloadModule64(m_hProcess, m_SymbolTable);
+		}
 
 		SymCleanup(m_hProcess);
+	}
 
+	if (m_hProcess)
+	{
 		CloseHandle(m_hProcess);
-		CloseHandle(m_hPdbFile);
+	}
 
-		m_Initialized = false;
+	if (m_hPdbFile)
+	{
+		CloseHandle(m_hPdbFile);
 	}
 }
 
-bool SYMBOL_PARSER::VerifyExistingPdb(GUID guid)
+bool SYMBOL_PARSER::VerifyExistingPdb(const GUID & guid)
 {
 	std::ifstream f(m_szPdbPath.c_str(), std::ios::binary | std::ios::ate);
 	if (f.bad())
@@ -63,16 +80,31 @@ bool SYMBOL_PARSER::VerifyExistingPdb(GUID guid)
 
 	auto * pPDBHeader = ReCa<PDBHeader7*>(pdb_raw);
 
-	int min_file_size = (int)pPDBHeader->root_stream_page_number_list_number * pPDBHeader->page_size + pPDBHeader->root_stream_size;
-	if (size_on_disk < (size_t)min_file_size)
+	if (memcmp(pPDBHeader->signature, "Microsoft C/C++ MSF 7.00\r\n\x1A""DS\0\0\0", sizeof(PDBHeader7::signature)))
 	{
 		delete[] pdb_raw;
 
 		return false;
 	}
 
-	int * pRootPageNumber = ReCa<int*>(pdb_raw + (size_t)pPDBHeader->root_stream_page_number_list_number * pPDBHeader->page_size);
-	auto * pRootStream = ReCa<RootStream7*>(pdb_raw + (size_t)(*pRootPageNumber) * pPDBHeader->page_size);
+	if (size_on_disk < (size_t)pPDBHeader->page_size * pPDBHeader->file_page_count)
+	{
+		delete[] pdb_raw;
+
+		return false;
+	}
+
+	int		* pRootPageNumber	= ReCa<int*>(pdb_raw + (size_t)pPDBHeader->root_stream_page_number_list_number * pPDBHeader->page_size);
+	auto	* pRootStream		= ReCa<RootStream7*>(pdb_raw + (size_t)(*pRootPageNumber) * pPDBHeader->page_size);
+
+	int size = 0;
+	for (int i = 0; i < pRootStream->num_streams; ++i)
+	{
+		if (pRootStream->stream_sizes[i] == 0xFFFFFFFF)
+			continue;
+
+		size += pRootStream->stream_sizes[i];
+	}
 	
 	std::map<int, std::vector<int>> streams;
 	int current_page_number = 0;
@@ -97,24 +129,25 @@ bool SYMBOL_PARSER::VerifyExistingPdb(GUID guid)
 		streams.insert({ i, numbers });
 	}
 
-	auto pdb_info_stream = streams.at(1);
-	auto pdb_info_page_index = pdb_info_stream.at(0);
+	auto pdb_info_page_index = streams.at(1).at(0);
 
-	auto * stram_data = ReCa<GUID_StreamData*>(pdb_raw + (size_t)(pdb_info_page_index) * pPDBHeader->page_size);
+	auto * stream_data = ReCa<GUID_StreamData*>(pdb_raw + (size_t)(pdb_info_page_index) * pPDBHeader->page_size);
 
-	int guid_eq = memcmp(&stram_data->guid, &guid, sizeof(GUID));
+	int guid_eq = memcmp(&stream_data->guid, &guid, sizeof(GUID));
 
 	delete[] pdb_raw;
 	
 	return (guid_eq == 0);
 }
 
-DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::string path, std::string * pdb_path_out, bool Redownload)
+DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::string path, std::string * pdb_path_out, bool Redownload, bool WaitForConnection)
 {
-	if (m_Initialized)
+	if (m_Ready)
 	{
 		return SYMBOL_ERR_ALREADY_INITIALIZED;
 	}
+
+	m_bInterruptEvent = false;
 
 	std::ifstream File(szModulePath, std::ios::binary | std::ios::ate);
 	if (!File.good())
@@ -139,7 +172,7 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 	}
 
 	File.seekg(0, std::ios::beg);
-	File.read(ReCa<char *>(pRawData), FileSize);
+	File.read(ReCa<char*>(pRawData), FileSize);
 	File.close();
 
 	IMAGE_DOS_HEADER	* pDos	= ReCa<IMAGE_DOS_HEADER*>(pRawData);
@@ -149,16 +182,15 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 	IMAGE_OPTIONAL_HEADER64 * pOpt64 = nullptr;
 	IMAGE_OPTIONAL_HEADER32 * pOpt32 = nullptr;
 
-
 	bool x86 = false;
 
 	if (pFile->Machine == IMAGE_FILE_MACHINE_AMD64)
 	{
-		pOpt64 = ReCa<IMAGE_OPTIONAL_HEADER64 *>(&pNT->OptionalHeader);
+		pOpt64 = ReCa<IMAGE_OPTIONAL_HEADER64*>(&pNT->OptionalHeader);
 	}
 	else if (pFile->Machine == IMAGE_FILE_MACHINE_I386)
 	{
-		pOpt32 = ReCa<IMAGE_OPTIONAL_HEADER32 *>(&pNT->OptionalHeader);
+		pOpt32 = ReCa<IMAGE_OPTIONAL_HEADER32*>(&pNT->OptionalHeader);
 		x86 = true;
 	}
 	else
@@ -198,7 +230,7 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		pDataDir = &pOpt64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
 	}
 
-	IMAGE_DEBUG_DIRECTORY * pDebugDir = ReCa<IMAGE_DEBUG_DIRECTORY *>(pLocalImageBase + pDataDir->VirtualAddress);
+	IMAGE_DEBUG_DIRECTORY * pDebugDir = ReCa<IMAGE_DEBUG_DIRECTORY*>(pLocalImageBase + pDataDir->VirtualAddress);
 
 	if (!pDataDir->Size || IMAGE_DEBUG_TYPE_CODEVIEW != pDebugDir->Type)
 	{
@@ -209,7 +241,7 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		return SYMBOL_ERR_NO_PDB_DEBUG_DATA;
 	}
 
-	PdbInfo * pdb_info = ReCa<PdbInfo *>(pLocalImageBase + pDebugDir->AddressOfRawData);
+	PdbInfo * pdb_info = ReCa<PdbInfo*>(pLocalImageBase + pDebugDir->AddressOfRawData);
 	if (pdb_info->Signature != 0x53445352)
 	{
 		VirtualFree(pLocalImageBase, 0, MEM_RELEASE);
@@ -310,7 +342,28 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		url += '/';
 		url += pdb_info->PdbFileName;
 
-		if (FAILED(URLDownloadToFileA(nullptr, url.c_str(), m_szPdbPath.c_str(), NULL, nullptr)))
+		if (WaitForConnection)
+		{
+			while (InternetCheckConnectionA("https://msdl.microsoft.com", FLAG_ICC_FORCE_CONNECTION, NULL) == FALSE)
+			{
+				Sleep(25);
+
+				if (m_bInterruptEvent)
+				{
+					VirtualFree(pLocalImageBase, 0, MEM_RELEASE);
+
+					delete[] pRawData;
+
+					return SYMBOL_ERR_INTERRUPT;
+				}
+			}
+		}
+
+		char szCacheFile[MAX_PATH]{ 0 };
+
+		m_DlMgr.SetInterruptEvent(m_hInterruptEvent);
+
+		if (FAILED(URLDownloadToCacheFileA(nullptr, url.c_str(), szCacheFile, MAX_PATH , NULL, &m_DlMgr)))
 		{
 			VirtualFree(pLocalImageBase, 0, MEM_RELEASE);
 
@@ -318,7 +371,18 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 
 			return SYMBOL_ERR_DOWNLOAD_FAILED;
 		}
+
+		if (!CopyFileA(szCacheFile, m_szPdbPath.c_str(), FALSE))
+		{
+			VirtualFree(pLocalImageBase, 0, MEM_RELEASE);
+
+			delete[] pRawData;
+
+			return SYMBOL_ERR_COPYFILE_FAILED;
+		}
 	}
+
+	m_fProgress = 1.0f;
 
 	VirtualFree(pLocalImageBase, 0, MEM_RELEASE);
 
@@ -334,8 +398,8 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		Filesize = file_attr_data.nFileSizeLow;
 	}
 
-	HANDLE hPdbFile = CreateFileA(m_szPdbPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, NULL, nullptr);
-	if (hPdbFile == INVALID_HANDLE_VALUE)
+	m_hPdbFile = CreateFileA(m_szPdbPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, NULL, nullptr);
+	if (m_hPdbFile == INVALID_HANDLE_VALUE)
 	{
 		return SYMBOL_ERR_CANT_OPEN_PDB_FILE;
 	}
@@ -343,7 +407,7 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 	m_hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentProcessId());
 	if (!m_hProcess)
 	{
-		CloseHandle(hPdbFile);
+		CloseHandle(m_hPdbFile);
 
 		return SYMBOL_ERR_CANT_OPEN_PROCESS;
 	}
@@ -351,10 +415,12 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 	if (!SymInitialize(m_hProcess, m_szPdbPath.c_str(), FALSE))
 	{
 		CloseHandle(m_hProcess);
-		CloseHandle(hPdbFile);
+		CloseHandle(m_hPdbFile);
 
 		return SYMBOL_ERR_SYM_INIT_FAIL;
 	}
+
+	m_Initialized = true;
 
 	SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_AUTO_PUBLICS);
 
@@ -364,7 +430,7 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		SymCleanup(m_hProcess);
 
 		CloseHandle(m_hProcess);
-		CloseHandle(hPdbFile);
+		CloseHandle(m_hPdbFile);
 
 		return SYMBOL_ERR_SYM_LOAD_TABLE;
 	}
@@ -374,14 +440,14 @@ DWORD SYMBOL_PARSER::Initialize(const std::string szModulePath, const std::strin
 		*pdb_path_out = m_szPdbPath;
 	}
 
-	m_Initialized = true;
+	m_Ready = true;
 
 	return SYMBOL_ERR_SUCCESS;
 }
 
 DWORD SYMBOL_PARSER::GetSymbolAddress(const char * szSymbolName, DWORD & RvaOut)
 {
-	if (!m_Initialized)
+	if (!m_Ready)
 	{
 		return SYMBOL_ERR_NOT_INITIALIZED;
 	}
@@ -401,4 +467,53 @@ DWORD SYMBOL_PARSER::GetSymbolAddress(const char * szSymbolName, DWORD & RvaOut)
 	RvaOut = (DWORD)(si.Address - si.ModBase);
 
 	return SYMBOL_ERR_SUCCESS;
+}
+
+void SYMBOL_PARSER::Interrupt()
+{
+	m_bInterruptEvent = true;
+
+	if (m_hInterruptEvent)
+	{
+		SetEvent(m_hInterruptEvent);
+		CloseHandle(m_hInterruptEvent);
+	}
+
+	if (m_Initialized)
+	{
+		if (m_SymbolTable)
+		{
+			SymUnloadModule64(m_hProcess, m_SymbolTable);
+		}
+
+		SymCleanup(m_hProcess);
+	}
+
+	if (m_hProcess)
+	{
+		CloseHandle(m_hProcess);
+	}
+
+	if (m_hPdbFile)
+	{
+		CloseHandle(m_hPdbFile);
+	}
+	
+	m_Initialized	= false;
+	m_Ready			= false;
+	m_SymbolTable	= 0;
+	m_hPdbFile		= nullptr;
+	m_hProcess		= nullptr;
+
+	m_hInterruptEvent = nullptr;
+}
+
+float SYMBOL_PARSER::GetDownloadProgress()
+{
+	if (m_fProgress == 1.0f)
+	{
+		return m_fProgress;
+	}
+
+	return m_DlMgr.GetDownloadProgress();
 }

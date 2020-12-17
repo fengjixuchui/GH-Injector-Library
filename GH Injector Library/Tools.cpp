@@ -32,13 +32,14 @@ DWORD ValidateFile(const wchar_t * szFile, DWORD desired_machine)
 	auto * pDos = ReCa<IMAGE_DOS_HEADER*>(headers);
 	auto * pNT	= ReCa<IMAGE_NT_HEADERS*>(headers + pDos->e_lfanew); //no need for correct nt headers type
 
-	WORD magic		= pDos->e_magic;
-	DWORD signature = pNT->Signature;
-	WORD machine	= pNT->FileHeader.Machine;
+	WORD	magic		= pDos->e_magic;
+	DWORD	signature	= pNT->Signature;
+	WORD	machine		= pNT->FileHeader.Machine;
+	WORD	character	= pNT->FileHeader.Characteristics;
 
 	delete[] headers;
 
-	if (magic != IMAGE_DOS_SIGNATURE || signature != IMAGE_NT_SIGNATURE || machine != desired_machine) //"MZ" & "PE"
+	if (magic != IMAGE_DOS_SIGNATURE || signature != IMAGE_NT_SIGNATURE || machine != desired_machine || !(character & IMAGE_FILE_DLL)) //"MZ" & "PE"
 	{
 		return FILE_ERR_INVALID_FILE;
 	}
@@ -241,4 +242,87 @@ std::wstring LaunchMethodToString(LAUNCH_METHOD method)
 	}
 
 	return std::wstring(L"bruh moment");
+}
+
+#if !defined(_WIN64) && defined(DUMP_SHELLCODE)
+
+void DumpShellcode(BYTE * start, int length, const wchar_t * szShellname)
+{
+	wchar_t Shellcodename[] = L"Shellcodes.txt";
+
+	wchar_t FullPath[MAX_PATH]{ 0 };
+	StringCbCopyW(FullPath, sizeof(FullPath), g_RootPathW.c_str());
+	StringCbCatW(FullPath, sizeof(FullPath), Shellcodename);
+
+	std::wofstream shellcodes(FullPath, std::ios_base::out | std::ios_base::app);
+	if (!shellcodes.good())
+	{
+		LOG("Failed to open/create shellcodename.txt file:\n%ls\n", FullPath);
+
+		return;
+	}
+
+	shellcodes << L"inline unsigned char " << szShellname << L"[] =\n";
+	shellcodes << L"{";
+
+	int row_length = 500;
+	int char_count = 6 * length - 2 + (length / row_length + 1) * 2 + 1; 
+	wchar_t * array_out = new wchar_t[char_count]();
+
+	if (!array_out)
+	{
+		LOG("Failed to allocate buffer for shellcode data\n");
+	
+		shellcodes.close();
+	}
+
+	int idx = 0;
+
+	for (auto i = 0; i < length; ++i)
+	{
+		if (!(i % row_length))
+		{
+			array_out[idx++] = '\n';
+			array_out[idx++] = '\t';
+		}
+
+		swprintf_s(&array_out[idx], char_count - idx, L"0x%02X", start[i]);
+
+		idx += 4;
+
+		if (i == length - 1)
+		{
+			break;
+		}
+
+		array_out[idx++] = ',';
+		array_out[idx++] = ' ';
+	}
+
+	shellcodes << array_out;
+	shellcodes << L"\n};\n\n";
+
+	shellcodes.close();
+}
+
+#endif
+
+float __stdcall GetDownloadProgress(bool bWow64)
+{
+#pragma EXPORT_FUNCTION(__FUNCTION__, __FUNCDNAME__)
+
+#ifdef _WIN64
+	if (bWow64)
+	{
+		return sym_ntdll_wow64.GetDownloadProgress();
+	}
+	else
+	{
+		return sym_ntdll_native.GetDownloadProgress();
+	}	
+#else
+	UNREFERENCED_PARAMETER(bWow64);
+
+	return sym_ntdll_native.GetDownloadProgress();
+#endif
 }

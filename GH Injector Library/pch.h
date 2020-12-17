@@ -27,6 +27,9 @@
 #include <urlmon.h>
 #include <future>
 
+//internet shit
+#include <WinInet.h>
+
 //warning shit
 #pragma warning(disable: 4201) //unnamed union
 #pragma warning(disable: 4324) //structure member alignment resulting in additional bytes being added as padding
@@ -85,7 +88,7 @@ enum class LAUNCH_METHOD
 	LM_QueueUserAPC
 };
 
-//macro to avoid compiler and shellcode related alignment issues
+//macro to avoid compiler and shellcode related alignment issues (unlikely but just to be sure)
 #define ALIGN_64 __declspec(align(8))
 #define ALIGN_86 __declspec(align(4))
 

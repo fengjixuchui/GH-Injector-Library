@@ -4,7 +4,7 @@
 
 DWORD InitErrorStruct(const wchar_t * szDllPath, INJECTIONDATAW * pData, int bNative, DWORD ErrorCode, ERROR_DATA error_data);
 
-DWORD InjectDLL(const wchar_t * szDllFile, HANDLE hTargetProc, INJECTION_MODE im, LAUNCH_METHOD Method, DWORD Flags, HINSTANCE & hOut, ERROR_DATA & error_data);
+DWORD InjectDLL(const wchar_t * szDllFile, HANDLE hTargetProc, INJECTION_MODE im, LAUNCH_METHOD Method, DWORD Flags, HINSTANCE & hOut, DWORD Timeout, ERROR_DATA & error_data);
 
 DWORD HijackHandle(INJECTIONDATAW * pData, ERROR_DATA & error_data);
 
@@ -83,6 +83,7 @@ DWORD __stdcall InjectA(INJECTIONDATAA * pData)
 	data.Mode				= pData->Mode;
 	data.Method				= pData->Method;
 	data.Flags				= pData->Flags;
+	data.Timeout			= pData->Timeout;
 	data.hHandleValue		= pData->hHandleValue;
 	data.GenerateErrorLog	= pData->GenerateErrorLog;
 
@@ -113,8 +114,6 @@ DWORD __stdcall InjectW(INJECTIONDATAW * pData)
 	RetVal = ResolveImports(error_data);
 	if (RetVal != INJ_ERR_SUCCESS)
 	{
-		INIT_ERROR_DATA(error_data, INJ_ERR_ADVANCED_NOT_DEFINED);
-
 		return InitErrorStruct(nullptr, pData, -1, RetVal, error_data);
 	}
 		
@@ -321,14 +320,14 @@ DWORD __stdcall InjectW(INJECTIONDATAW * pData)
 #ifdef _WIN64
 	if (native_target)
 	{
-		RetVal = InjectDLL(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, error_data);
+		RetVal = InjectDLL(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, pData->Timeout, error_data);
 	}
 	else
 	{		
-		RetVal = InjectDLL_WOW64(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, error_data);
+		RetVal = InjectDLL_WOW64(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, pData->Timeout, error_data);
 	}	
 #else
-	RetVal = InjectDLL(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, error_data);
+	RetVal = InjectDLL(szDllPath, hTargetProc, pData->Mode, pData->Method, pData->Flags, hOut, pData->Timeout, error_data);
 #endif
 
 	LOG("Injection finished\n");
@@ -364,6 +363,7 @@ DWORD HijackHandle(INJECTIONDATAW * pData, ERROR_DATA & error_data)
 	INJECTIONDATAW hijack_data{ 0 };
 	hijack_data.Mode	= INJECTION_MODE::IM_LdrLoadDll;
 	hijack_data.Method	= LAUNCH_METHOD::LM_NtCreateThreadEx;
+	hijack_data.Timeout = pData->Timeout;
 	hijack_data.GenerateErrorLog = pData->GenerateErrorLog;
 
 	HRESULT hr = StringCbCopyW(hijack_data.szDllPath, sizeof(hijack_data.szDllPath), g_RootPathW.c_str());
@@ -395,7 +395,7 @@ DWORD HijackHandle(INJECTIONDATAW * pData, ERROR_DATA & error_data)
 	
 	DWORD LastErrCode	= INJ_ERR_SUCCESS;
 	HANDLE hHijackProc	= nullptr;
-	for (auto i : handles)
+	for (const auto & i : handles)
 	{
 		hHijackProc = OpenProcess(access_mask | PROCESS_CREATE_THREAD, FALSE, i.OwnerPID);
 		if (!hHijackProc)
@@ -462,7 +462,7 @@ DWORD HijackHandle(INJECTIONDATAW * pData, ERROR_DATA & error_data)
 		pData->hHandleValue = 0;
 
 		DWORD hijack_ret = INJ_ERR_SUCCESS;
-		DWORD remote_ret = StartRoutine(hHijackProc, pRemoteInjectW, pArg, LAUNCH_METHOD::LM_NtCreateThreadEx, false, hijack_ret, error_data);
+		DWORD remote_ret = StartRoutine(hHijackProc, pRemoteInjectW, pArg, LAUNCH_METHOD::LM_NtCreateThreadEx, false, hijack_ret, pData->Timeout, error_data);
 		
 		INJECTIONDATAW data_out{ 0 };
 		ReadProcessMemory(hHijackProc, pArg, &data_out, sizeof(INJECTIONDATAW), nullptr);
@@ -531,4 +531,35 @@ HRESULT __stdcall GetVersionW(wchar_t * out, size_t cb_size)
 	}
 
 	return StringCbCopyW(out, cb_size, GH_INJ_VERSIONW);
+}
+
+DWORD __stdcall GetSymbolState()
+{
+#pragma EXPORT_FUNCTION(__FUNCTION__, __FUNCDNAME__)
+
+	if (sym_ntdll_native_ret.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+	{
+		return INJ_ERR_SYMBOL_INIT_NOT_DONE;
+	}
+
+	DWORD sym_ret = sym_ntdll_native_ret.get();
+	if (sym_ret != SYMBOL_ERR_SUCCESS)
+	{
+		return sym_ret;
+	}
+
+#ifdef _WIN64
+	if (sym_ntdll_wow64_ret.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+	{
+		return INJ_ERR_SYMBOL_INIT_NOT_DONE;
+	}
+
+	sym_ret = sym_ntdll_wow64_ret.get();
+	if (sym_ret != SYMBOL_ERR_SUCCESS)
+	{
+		return sym_ret;
+	}
+#endif
+
+	return SYMBOL_ERR_SUCCESS;
 }
