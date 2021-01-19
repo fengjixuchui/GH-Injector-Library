@@ -10,6 +10,10 @@
 //If needed:
 //auto ValidateInjectionFunctions	= (f_ValidateInjectionFunctions)GetProcAddress(hInjectionMod, "ValidateInjectionFunctions");
 //auto RestorenjectionFunctions		= (f_RestoreInjectionFunctions)GetProcAddress(hInjectionMod, "RestorenjectionFunctions");
+//
+//Symbol state:
+//auto GetSymbolState 		= (f_GetSymbolState)GetProcAddress(hInjectionMod, "GetSymbolState");
+//auto GetDownloadProgress 	= (f_GetDownloadProgress)GetProcAddress(hInjectionMod, "GetDownloadProgress");
 
 #pragma once
 
@@ -45,6 +49,7 @@ enum class INJECTION_MODE
 	IM_LoadLibraryExW,
 	IM_LdrLoadDll,
 	IM_LdrpLoadDll,
+	IM_LdrpLoadDllInternal,
 	IM_ManualMap
 };
 
@@ -146,3 +151,6 @@ using f_GetVersionW = HRESULT(__stdcall *)(wchar_t	* out, size_t cb_size);
 using f_GetSymbolState = DWORD(__stdcall *)();
 
 using f_GetDownloadProgress = float(__stdcall *)(bool bWoW64);
+
+using f_raw_print_callback = void(__stdcall *)(const char * szText);
+using f_SetRawPrintCallback = DWORD(__stdcall *)(f_raw_print_callback callback);
